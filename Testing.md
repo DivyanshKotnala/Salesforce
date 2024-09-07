@@ -1,6 +1,6 @@
 # Find all the necessary Feild
 
-Use it in ctrl +e ;
+
 
 String sObjectName = 'Appointment__c';
 List<String> requiredFields = new List<String>();
