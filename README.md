@@ -2,7 +2,7 @@
 
 #Use Static resource 
 
-Upload the Static Resource
+#Upload the Static Resource
 Go to Setup in Salesforce.
 Search for Static Resources in the Quick Find box.
 Click Static Resources.
