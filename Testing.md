@@ -1,8 +1,8 @@
 # Find all the necessary Feild
 
-[!NOTE] Use it in ctrl +e ;
+Use it in ctrl +e ;
 
-**String sObjectName = 'Appointment__c';
+String sObjectName = 'Appointment__c';
 List<String> requiredFields = new List<String>();
 Schema.SObjectType sObjectType = Schema.getGlobalDescribe().get(sObjectName);
    
@@ -18,5 +18,5 @@ for (Schema.SObjectField field : describeResult.fields.getMap().values()) {
                 requiredFields.add(fieldDescribe.getName());
             }
         }
-System.debug('Required Fields for ' + sObjectName + ': ' + requiredFields);**
+System.debug('Required Fields for ' + sObjectName + ': ' + requiredFields);
     
