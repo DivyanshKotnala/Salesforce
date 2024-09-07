@@ -20,3 +20,7 @@ for (Schema.SObjectField field : describeResult.fields.getMap().values()) {
         }
 System.debug('Required Fields for ' + sObjectName + ': ' + requiredFields);
     
+
+
+
+
