@@ -1,5 +1,5 @@
 #Use Static resource 
-
+_________________________________________________________________________________________________________________________________________________
 Upload the Static Resource
 Go to Setup in Salesforce.
 Search for Static Resources in the Quick Find box.
@@ -28,7 +28,7 @@ export default class MyComponent extends LightningElement {
 
 
 # Parent To Child
-
+_______________________________________________________________________________________________________________________________
 
 // ParentLWC.js
 import { LightningElement } from 'lwc';
