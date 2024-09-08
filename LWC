@@ -24,7 +24,7 @@ export default class MyComponent extends LightningElement {
 <template>
     <img src={imageUrl} alt="My Image" />
 </template>
-
+______________________________________________________________________________________________________________________________
 
 
 # Parent To Child
@@ -78,3 +78,4 @@ export default class ChildLWC extends LightningElement {
         <p>Message from Parent: {messageFromParent}</p>
     </lightning-card>
 </template>
+_____________________________________________________________________________________________________________________________________________
