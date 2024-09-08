@@ -24,3 +24,57 @@ export default class MyComponent extends LightningElement {
 <template>
     <img src={imageUrl} alt="My Image" />
 </template>
+
+
+
+# Parent To Child
+
+
+// ParentLWC.js
+import { LightningElement } from 'lwc';
+
+export default class ParentLWC extends LightningElement {
+    showChild = false; // Controls if child component is displayed or not
+    messageForChild = "Hello from Parent!"; // Message to send to child component
+
+    // Method to toggle child visibility
+    toggleChildVisibility() {
+        this.showChild = !this.showChild; // Toggle the value
+    }
+}
+
+//HTML
+<template>
+    <lightning-card title="Parent LWC">
+        <!-- Button to toggle child component visibility -->
+        <lightning-button label="Toggle Child Component" onclick={toggleChildVisibility}></lightning-button>
+
+        <!-- Conditional rendering of child component based on 'showChild' -->
+        <template if:true={showChild}>
+            <c-child-lwc message-from-parent={messageForChild}></c-child-lwc>
+        </template>
+
+        <!-- Show when child is not visible -->
+        <template if:false={showChild}>
+            <p>Child component is hidden.</p>
+        </template>
+    </lightning-card>
+</template>
+
+
+
+
+//Child
+// ChildLWC.js
+import { LightningElement, api } from 'lwc';
+
+export default class ChildLWC extends LightningElement {
+    @api messageFromParent; // Public property to receive data from parent
+}
+
+//HTML
+<template>
+    <lightning-card title="Child LWC">
+        <p>Message from Parent: {messageFromParent}</p>
+    </lightning-card>
+</template>
