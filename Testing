@@ -22,4 +22,8 @@ System.debug('Required Fields for ' + sObjectName + ': ' + requiredFields);
 __________________________________________________________________________________________________________________________________________________
 
 
+Json - SObject
+String createList ='[{"sobjectType":"Contact_Role_Rc_c" , "Role_c":"Execute","IsPrimary__c":"false","Opportunity__c":"'+oppList[0].id+'","Id" : "'+conRoleCreate.Id+'"}]';
+
+______________________________________________________________________________________________________________________________________________________
 
