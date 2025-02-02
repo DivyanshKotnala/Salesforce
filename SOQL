@@ -1,0 +1,37 @@
+Query Child Records from Parent (Parent-to-Child)
+
+SELECT Id, Name, (SELECT Id, FirstName, LastName FROM Contacts)
+    FROM Account
+    WHERE Id IN :accountIds
+
+
+--------------------------------------------------------------------------------
+ Query Parent Records from Child (Child-to-Parent)
+
+ SELECT Id, FirstName, LastName, Account.Name, Account.Industry
+    FROM Contact
+    WHERE AccountId IN :accountIds
+
+
+-------------------------------------------------------------------------------
+Query Both Directions Together
+
+
+    SELECT Id, Name, Parent.Name, (SELECT Id, FirstName, LastName FROM Contacts)
+    FROM Account
+    WHERE ParentId != null
+
+------------------------------------------------------------------------------
+
+ Custom Relationships
+
+Parent-to-Child
+
+SELECT Id, Name, (SELECT Id, CustomField__c FROM CustomObjects__r)
+    FROM ParentObject__c
+
+Child-to-Parent:
+
+SELECT Id, CustomField__c, ParentObject__r.Name
+    FROM CustomObject__c
+
