@@ -1,0 +1,19 @@
+how to stop recursion
+---------------------------------------
+//First and easy method 
+-
+public class TriggerStopper {
+  public static String check = false;
+}
+
+
+-
+Trigger AccountTrigger on Acoount(After Update){
+  if(Trigger.isUpdate && Trigger.isAfter){
+   if(TriggerStopper.check) return;
+
+   TriggerStopper.check = true;
+   
+ }
+  
+}
