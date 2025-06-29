@@ -27,3 +27,55 @@ String createList ='[{"sobjectType":"Contact_Role_Rc_c" , "Role_c":"Execute","Is
 
 ______________________________________________________________________________________________________________________________________________________
 
+HTTP Test Class
+
+Http class
+
+public class HttpCall {
+       public static String getAnimalNameById(Integer id) {
+        Http http = new Http();
+        HttpRequest request = new HttpRequest();
+        request.setEndpoint('https://th-apex-http-callout.herokuapp.com/animals/'+id);
+        request.setMethod('GET');
+        HttpResponse response = http.send(request);
+        String strResp = '';
+        if (response.getStatusCode() == 200) {
+            Map < String, Object > results = (Map < String, Object >) JSON.deserializeUntyped(response.getBody());
+            Map < string, Object > animals = (Map < String, Object >) results.get('animal');
+            strResp = string.valueof(animals.get('name'));
+        }
+        return strResp ;
+    }  
+    
+}
+
+
+Test Class
+
+
+@isTest
+public class HttpCallTest {
+   
+    @isTest
+   private static  void testPostCallout() {
+        Test.setMock(HttpCalloutMock.class, new AnimalLocatorMock());  
+        String strResp = HttpCall.getAnimalNameById(2);
+    }
+    
+    
+}
+
+
+
+http call
+
+@isTest
+global class AnimalLocatorMock implements HttpCalloutMock {
+    global HTTPResponse respond(HTTPRequest request) {
+        HttpResponse response = new HttpResponse();
+        response.setHeader('Content-Type', 'application/json');
+        response.setBody('{"animal": {"id":2, "name":"Test"}}');
+        response.setStatusCode(200);
+        return response; 
+    }
+}
