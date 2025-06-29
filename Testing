@@ -79,3 +79,49 @@ global class AnimalLocatorMock implements HttpCalloutMock {
         return response; 
     }
 }
+
+
+-----------------------------------------------------------------------------------------------------------------------------------
+Batch class Test
+
+
+Batch class
+
+global class BatchApexTestExample implements Database.Batchable<Sobject>{
+    global Database.QueryLocator start(Database.BatchableContext bc){
+        return Database.getQueryLocator('select leadsource,rating from lead');
+    }
+    global void execute(Database.BatchableContext bc,List<Lead> scope){
+        for(Lead l : scope){
+            if(l.leadsource=='web'){
+                l.rating='warm';
+            }
+        }
+        update scope;
+    }
+    public void finish(Database.BatchableContext bc){
+         
+    }
+}
+
+
+
+Batch class Test
+
+@isTest
+private class BatchApexTestExampleTest {
+    static testMethod void testme(){
+        Lead l = new Lead();
+        l.FirstName='Salesforce';
+        l.LastName='Codes';
+        l.Company='salesforcecodes';
+        l.leadsource='Web';
+        insert l;
+        Test.startTest();
+        BatchApexTestExample ba= new BatchApexTestExample();
+        Id jobid= Database.executeBatch(ba,5); // 5 is batch size
+        Test.stopTest();
+        Lead leads = [select rating from lead where id=:l.Id];
+        system.assertEquals('Warm', leads.Rating);
+    }
+}
