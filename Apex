@@ -18,3 +18,872 @@ public class HttpCalloutSample {
     return res.getBody();
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+public with sharing class RecordTouchBatch implements 
+Database.Batchable<SObject>,Database.Stateful,  Schedulable {
+    
+    // -------------------------------------------------------------------------
+    // Batch configuration
+    // -------------------------------------------------------------------------
+    
+    public String objectName { get; private set; }
+    public String whereClause { get; private set; }
+    public Integer batchSize { get; private set; }
+    public String notifyEmail { get; private set; }
+    
+    // -------------------------------------------------------------------------
+    // Repeat configuration
+    // -------------------------------------------------------------------------
+    
+    public Boolean isRepeatJob { get; private set; }
+    public Integer repeatAfterDays { get; private set; }
+    public List<String> repeatWeekdays { get; private set; }
+    
+  
+    public Integer repeatHour { get; private set; }
+    public Datetime scheduledRunDatetime { get; private set; }
+    public Id batchAutomationId { get; private set; }
+    
+
+    private Boolean applyRepeatHourWindow = false;
+    
+    private Datetime pendingNextRunDatetime;
+    private Boolean pendingNextRunAppliesHourWindow = false;
+    
+    // -------------------------------------------------------------------------
+    // Runtime query information
+    // -------------------------------------------------------------------------
+    
+    private String overrideQuery;
+    private String executedQuery;
+    
+    // -------------------------------------------------------------------------
+    // Batch statistics
+    // -------------------------------------------------------------------------
+    
+    private Integer totalCount   = 0;
+    private Integer successCount = 0;
+    private Integer failureCount = 0;
+    
+    private List<String> errorSamples = new List<String>();
+    
+    private static final Integer MAX_ERROR_SAMPLES = 50;
+    
+    // -------------------------------------------------------------------------
+    // Weekday configuration
+    // -------------------------------------------------------------------------
+    
+    private static final List<String> WEEKDAY_CODES_BY_INDEX =
+        new List<String>{
+            'SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'
+                };
+                    
+
+                    private static final Date WEEKDAY_REFERENCE_SUNDAY =
+                    Date.newInstance(2023, 1, 1);
+    
+
+    private static final Pattern LAST_MODIFIED_WINDOW_PATTERN = Pattern.compile(
+        '(?i)\\(?\\s*LastModifiedDate\\s*>=\\s*\\S+\\s+AND\\s+LastModifiedDate\\s*<\\s*\\S+\\s*\\)?'
+    );
+    
+    // -------------------------------------------------------------------------
+    // Constructors
+    // -------------------------------------------------------------------------
+    
+    /**
+* Constructor for an immediate, non-repeating "Run Now" batch.
+*/
+    public RecordTouchBatch(
+        String objectName,
+        String whereClause,
+        Integer batchSize,
+        String notifyEmail
+    ) {
+        this(
+            objectName, whereClause, batchSize, notifyEmail,
+            false, null, null, null, null, null
+        );
+    }
+    
+
+    public RecordTouchBatch(String objectName, String whereClause, Integer batchSize, String notifyEmail,
+                            Boolean isRepeatJob, Integer repeatAfterDays, List<String> repeatWeekdays,
+                            Integer repeatHour,  Datetime scheduledRunDatetime,  Id batchAutomationId  ) {
+                                if (String.isBlank(objectName)) {
+                                    throw new RecordTouchException('objectName is required.');
+                                }
+                                if (String.isBlank(whereClause)) {
+                                    throw new RecordTouchException('whereClause is required.');
+                                }
+                                
+                                Boolean repeat = isRepeatJob == true;
+                                
+                                if (repeatHour != null && repeatHour < 1) {
+                                    throw new RecordTouchException(
+                                        'repeatHour must be greater than zero when provided.'
+                                    );
+                                }
+                                
+                                Boolean hasInterval  = repeatAfterDays != null && repeatAfterDays > 0;
+                                Boolean hasWeekdays  = repeatWeekdays   != null && !repeatWeekdays.isEmpty();
+                                
+                                if (repeat && !hasInterval && !hasWeekdays) {
+                                    throw new RecordTouchException(
+                                        'A repeat interval or a set of weekdays is required for a repeating job.'
+                                    );
+                                }
+                                
+                                this.objectName  = objectName.trim();
+                                this.whereClause = whereClause.trim();
+                                this.batchSize   =
+                                    batchSize == null || batchSize < 1
+                                    ? 200
+                                    : Math.min(batchSize, 2000);
+                                
+                                this.notifyEmail = notifyEmail;
+                                this.isRepeatJob = repeat;
+                                
+                                // Weekday mode takes precedence when both modes are accidentally supplied.
+                                if (repeat && hasWeekdays) {
+                                    this.repeatWeekdays  = normalizeWeekdayCodes(repeatWeekdays);
+                                    this.repeatAfterDays = null;
+                                } else if (repeat && hasInterval) {
+                                    this.repeatAfterDays = repeatAfterDays;
+                                    this.repeatWeekdays  = null;
+                                } else {
+                                    this.repeatAfterDays = null;
+                                    this.repeatWeekdays  = null;
+                                }
+                                
+                                this.repeatHour           = repeat ? repeatHour : null;
+                                this.scheduledRunDatetime = scheduledRunDatetime;
+                                this.batchAutomationId   = batchAutomationId;
+                            }
+    
+
+    public Database.QueryLocator start(Database.BatchableContext batchContext) {
+        executedQuery = resolveQuery();
+        return Database.getQueryLocator(executedQuery);
+    }
+    
+    public void execute(Database.BatchableContext batchContext, List<SObject> scope) {
+        totalCount += scope.size();
+        
+        List<Database.SaveResult> results = Database.update(scope, false);
+        
+        for (Integer index = 0; index < results.size(); index++) {
+            Database.SaveResult result = results[index];
+            
+            if (result.isSuccess()) {
+                successCount++;
+                continue;
+            }
+            
+            failureCount++;
+            
+            if (errorSamples.size() < MAX_ERROR_SAMPLES) {
+                String errorMessage = '';
+                for (Database.Error currentError : result.getErrors()) {
+                    if (String.isNotBlank(errorMessage)) { errorMessage += '; '; }
+                    errorMessage +=
+                        String.valueOf(currentError.getStatusCode()) +
+                        ': ' +
+                        currentError.getMessage();
+                }
+                errorSamples.add(String.valueOf(scope[index].Id) + ' -> ' + errorMessage);
+            }
+        }
+    }
+    
+    
+    public void finish(Database.BatchableContext batchContext) {
+        string nextquer = '';
+        if (batchAutomationId != null) {
+            try {
+                List<Batch_Automation__c> records = [
+                    SELECT Id, Last_Run_Success_Count__c, Last_Run_Failure_Count__c,
+                    Last_Run_Total_Count__c, Query__c
+                    FROM Batch_Automation__c
+                    WHERE Id = :batchAutomationId
+                    LIMIT 1
+                ];
+                if (!records.isEmpty()) {
+                    Batch_Automation__c rec = records[0];
+                    rec.Last_Run_Success_Count__c = successCount;
+                    rec.Last_Run_Failure_Count__c = failureCount;
+                    rec.Last_Run_Total_Count__c   = totalCount;
+                    
+                    if (pendingNextRunDatetime != null) {
+                        
+                        String nextQuery = buildQueryForRun(
+                            pendingNextRunDatetime,
+                            pendingNextRunAppliesHourWindow
+                        );
+                        
+                        rec.Query__c = nextQuery;
+                        rec.Next_fire_time__c = pendingNextRunDatetime;
+                        
+                        System.debug(LoggingLevel.ERROR,
+                                     'Future Query=' + nextQuery
+                                    );
+                        
+                        System.debug(LoggingLevel.ERROR,
+                                     'Next Fire Time=' + pendingNextRunDatetime
+                                    );
+                    }
+                    nextquer = rec.Query__c;
+                    update rec;
+                }
+            } catch (Exception statsException) {
+                // FIX-1 pattern: log but do not block completion.
+                System.debug(
+                    LoggingLevel.WARN,
+                    'RecordTouchBatch.finish: failed to persist run statistics — ' +
+                    statsException.getMessage()
+                );
+            }
+        }
+        
+        // No notification required when no email address was supplied.
+        if (String.isBlank(notifyEmail)) {
+            return;
+        }
+        
+        AsyncApexJob asyncJob = [
+            SELECT Id, Status, NumberOfErrors, JobItemsProcessed, TotalJobItems, CreatedBy.Email
+            FROM AsyncApexJob
+            WHERE Id = :batchContext.getJobId()
+            LIMIT 1
+        ];
+        
+        String subject =
+            'Mass Record Retouch finished: ' + objectName +
+            ' (' + successCount + ' updated, ' + failureCount + ' failed)';
+        
+        String body =
+            'Object: '      + objectName      + '\n' +
+            'Batch Job Id: ' + asyncJob.Id     + '\n' +
+            'Batch Status: ' + asyncJob.Status + '\n' +
+            'Batch Size: '   + batchSize       + '\n\n' +
+            'Total Records: ' + totalCount   + '\n' +
+            'Updated: '       + successCount + '\n' +
+            'Failed: '        + failureCount + '\n';
+        
+        
+        if (String.isNotBlank(executedQuery)) {
+            body += '\nExecuted Query:\n' + executedQuery + '\n';
+            body += '\n Future Query :\n ' + nextquer +'\n';
+        } else {
+            body += '\nFilter:\n' + whereClause + '\n';
+        }
+        
+        if (isRepeatJob) {
+            body += '\nRecurring Job: Yes\n';
+            if (repeatWeekdays != null && !repeatWeekdays.isEmpty()) {
+                body += 'Repeat Schedule: ' + String.join(repeatWeekdays, ', ') + '\n';
+            } else {
+                body += 'Repeat Schedule: Every ' + repeatAfterDays + ' day(s)\n';
+            }
+            if (repeatHour != null) {
+                body += 'LastModifiedDate Lookback: ' + repeatHour + ' hour(s)\n';
+                body += 'Lookback Applied On This Run: ' + String.valueOf(applyRepeatHourWindow == true) + '\n';
+            }
+            if (scheduledRunDatetime != null) {
+                body += 'Scheduled Run Time: ' + scheduledRunDatetime.format() + '\n';
+            }
+           
+            body += 'Next Run Scheduled: ' + String.valueOf(pendingNextRunDatetime != null) + '\n';
+            if (pendingNextRunDatetime != null) {
+                body += 'Next Run Time: ' + pendingNextRunDatetime.format() + '\n';
+            }
+        } else {
+            body += '\nRecurring Job: No\n';
+        }
+        
+        if (!errorSamples.isEmpty()) {
+            body +=
+                '\nSample errors, first ' + errorSamples.size() + ':\n' +
+                String.join(errorSamples, '\n');
+        }
+        
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+        email.setToAddresses(new List<String>{ notifyEmail });
+        email.setSubject(subject);
+        email.setPlainTextBody(body);
+        email.setSaveAsActivity(false);
+        
+        try {
+            Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ email });
+        } catch (Exception emailException) {
+
+            System.debug(
+                LoggingLevel.WARN,
+                'RecordTouchBatch.finish: notification email could not be sent — ' +
+                emailException.getMessage()
+            );
+        }
+    }
+    
+
+
+    private String resolveQuery() {
+       
+        if (String.isNotBlank(overrideQuery)) {
+            return overrideQuery.trim();
+        }
+        
+        Datetime runTime = scheduledRunDatetime != null ? scheduledRunDatetime : Datetime.now();
+        return buildQueryForRun(runTime, applyRepeatHourWindow == true);
+    }
+    
+
+    private String buildQueryForRun(Datetime runTime, Boolean applyHourWindow) {
+      
+        String cleanWhereClause = stripExistingLastModifiedWindow(whereClause);
+        
+        String queryToRun =
+            'SELECT Id FROM ' + objectName +
+            (String.isNotBlank(cleanWhereClause) ? ' WHERE ' + cleanWhereClause : '');
+        
+        if (applyHourWindow == true && repeatHour != null && repeatHour > 0 && runTime != null) {
+            Datetime windowEnd   = runTime;
+            Datetime windowStart = windowEnd.addHours(-repeatHour);
+            
+            String lastModifiedCondition =
+                'LastModifiedDate >= ' + formatSoqlDatetime(windowStart) +
+                ' AND LastModifiedDate < '  + formatSoqlDatetime(windowEnd);
+            
+            queryToRun = addConditionToQuery(queryToRun, lastModifiedCondition);
+        }
+        
+        return queryToRun;
+    }
+    
+
+    private static String stripExistingLastModifiedWindow(String rawWhereClause) {
+        if (String.isBlank(rawWhereClause)) {
+            return rawWhereClause;
+        }
+        
+        String cleaned = LAST_MODIFIED_WINDOW_PATTERN.matcher(rawWhereClause).replaceAll('');
+        
+        // Collapse "AND AND" / leading "AND" / trailing "AND" left behind
+        // by removing the window condition from the middle or an edge.
+        cleaned = Pattern.compile('(?i)\\bAND\\s+AND\\b').matcher(cleaned).replaceAll('AND');
+        cleaned = Pattern.compile('(?i)^\\s*AND\\s+').matcher(cleaned).replaceAll('');
+        cleaned = Pattern.compile('(?i)\\s+AND\\s*$').matcher(cleaned).replaceAll('');
+        
+        return cleaned.trim();
+    }
+    
+    private static String formatSoqlDatetime(Datetime value) {
+        return value.formatGmt('yyyy-MM-dd\'T\'HH:mm:ss\'Z\'');
+    }
+    
+
+    private static String addConditionToQuery(String baseQuery, String additionalCondition) {
+        if (String.isBlank(baseQuery)) {
+            throw new RecordTouchException('Cannot add a condition to an empty query.');
+        }
+        if (String.isBlank(additionalCondition)) {
+            return baseQuery;
+        }
+        
+        String trimmedQuery = removeTrailingSemicolon(baseQuery.trim());
+        
+        Integer insertionPosition = findTopLevelTrailingClausePosition(trimmedQuery);
+        
+        String mainQuery;
+        String trailingQuery;
+        
+        if (insertionPosition == null) {
+            mainQuery    = trimmedQuery;
+            trailingQuery = '';
+        } else {
+            mainQuery    = trimmedQuery.substring(0, insertionPosition).trim();
+            trailingQuery = trimmedQuery.substring(insertionPosition).trim();
+        }
+        
+        Boolean hasTopLevelWhere = containsTopLevelKeyword(mainQuery, 'WHERE');
+        
+        if (hasTopLevelWhere) {
+            mainQuery += ' AND (' + additionalCondition + ')';
+        } else {
+            mainQuery += ' WHERE (' + additionalCondition + ')';
+        }
+        
+        if (String.isNotBlank(trailingQuery)) {
+            mainQuery += ' ' + trailingQuery;
+        }
+        
+        return mainQuery;
+    }
+    
+    
+    private static Integer findTopLevelTrailingClausePosition(String query) {
+        List<String> trailingClauses = new List<String>{
+            'GROUP BY', 'HAVING', 'ORDER BY', 'LIMIT', 'OFFSET',
+                'WITH SECURITY_ENFORCED', 'FOR UPDATE', 'FOR VIEW', 'FOR REFERENCE'
+                };
+                    
+                    Integer earliestPosition;
+        
+        for (String clause : trailingClauses) {
+            Integer currentPosition = findTopLevelKeywordPosition(query, clause);
+            if (currentPosition != null &&
+                (earliestPosition == null || currentPosition < earliestPosition)) {
+                    earliestPosition = currentPosition;
+                }
+        }
+        
+        return earliestPosition;
+    }
+    
+  
+    private static Boolean containsTopLevelKeyword(String query, String keyword) {
+        return findTopLevelKeywordPosition(query, keyword) != null;
+    }
+    
+
+    private static Integer findTopLevelKeywordPosition(String query, String keyword) {
+        if (String.isBlank(query) || String.isBlank(keyword)) {
+            return null;
+        }
+        
+        String upperQuery   = query.toUpperCase();
+        String upperKeyword = keyword.toUpperCase();
+        
+        Integer parenthesisDepth = 0;
+        Boolean insideString     = false;
+        
+        for (Integer index = 0; index <= query.length() - upperKeyword.length(); index++) {
+            String currentCharacter = query.substring(index, index + 1);
+            
+            if (currentCharacter == '\'') {
+                if (!isEscapedCharacter(query, index)) {
+                    insideString = !insideString;
+                }
+                continue;
+            }
+            
+            if (insideString) { continue; }
+            
+            if (currentCharacter == '(') { parenthesisDepth++; continue; }
+            if (currentCharacter == ')') {
+                if (parenthesisDepth > 0) { parenthesisDepth--; }
+                continue;
+            }
+            
+            if (parenthesisDepth != 0) { continue; }
+            
+            if (upperQuery.substring(index, index + upperKeyword.length()) == upperKeyword &&
+                isKeywordBoundary(upperQuery, index, upperKeyword.length())) {
+                    return index;
+                }
+        }
+        
+        return null;
+    }
+    
+ 
+    private static Boolean isEscapedCharacter(String text, Integer characterPosition) {
+        Integer precedingBackslashes = 0;
+        Integer currentPosition      = characterPosition - 1;
+        
+        while (currentPosition >= 0 &&
+               text.substring(currentPosition, currentPosition + 1) == '\\') {
+                   precedingBackslashes++;
+                   currentPosition--;
+               }
+        
+        return Math.mod(precedingBackslashes, 2) == 1;
+    }
+    
+  
+    private static Boolean isKeywordBoundary(String query, Integer startPosition, Integer keywordLength) {
+        Integer endPosition = startPosition + keywordLength;
+        
+        Boolean validStart =
+            startPosition == 0 ||
+            !isIdentifierCharacter(query.substring(startPosition - 1, startPosition));
+        
+        Boolean validEnd =
+            endPosition >= query.length() ||
+            !isIdentifierCharacter(query.substring(endPosition, endPosition + 1));
+        
+        return validStart && validEnd;
+    }
+    
+   
+    private static Boolean isIdentifierCharacter(String characterValue) {
+        if (String.isBlank(characterValue)) { return false; }
+        return Pattern.matches('[A-Z0-9_]', characterValue.toUpperCase());
+    }
+    
+   
+    private static String removeTrailingSemicolon(String query) {
+        String cleanedQuery = query.trim();
+        if (cleanedQuery.endsWith(';')) {
+            cleanedQuery = cleanedQuery.substring(0, cleanedQuery.length() - 1).trim();
+        }
+        return cleanedQuery;
+    }
+    
+
+    public void execute(SchedulableContext schedulableContext) {
+        System.debug(
+            LoggingLevel.INFO,
+            'RecordTouchBatch.execute(Schedulable): batchAutomationId=' + batchAutomationId +
+            ', isRepeatJob=' + isRepeatJob +
+            ', repeatAfterDays=' + repeatAfterDays +
+            ', repeatWeekdays=' + repeatWeekdays +
+            ', repeatHour=' + repeatHour +
+            ', scheduledRunDatetime=' + scheduledRunDatetime
+        );
+        
+        Batch_Automation__c automation;
+        Boolean shouldRun = true;
+        
+        if (batchAutomationId != null) {
+            List<Batch_Automation__c> automationMatches = [
+                SELECT Id, Active__c, Query__c, Next_fire_time__c, Last_Run_Time__c
+                FROM Batch_Automation__c
+                WHERE Id = :batchAutomationId
+                LIMIT 1
+            ];
+            
+            automation = automationMatches.isEmpty() ? null : automationMatches[0];
+            
+            if (automation == null || automation.Active__c != true) {
+                shouldRun = false;
+            } else if (String.isNotBlank(automation.Query__c)) {
+                overrideQuery = automation.Query__c.trim();
+            }
+        }
+        
+        if (shouldRun) {
+            if (isRepeatJob) {
+                try {
+                    scheduleNextOccurrence(automation);
+                } catch (Exception schedulingException) {
+                    
+                    System.debug(
+                        LoggingLevel.ERROR,
+                        'RecordTouchBatch.execute: failed to schedule next occurrence — ' +
+                        schedulingException.getMessage() + '\n' +
+                        schedulingException.getStackTraceString()
+                    );
+                    if (automation != null) {
+                        automation.Next_fire_time__c = null;
+                        automation.Active__c         = false;
+                    }
+               
+                    pendingNextRunDatetime = null;
+                    pendingNextRunAppliesHourWindow = false;
+                }
+            } else if (automation != null) {
+                           
+                automation.Next_fire_time__c = null;
+                automation.Active__c         = false;
+            }
+            
+            if (automation != null) {
+                automation.Last_Run_Time__c = Datetime.now();
+                try {
+                    update automation;
+                } catch (Exception bookkeepingException) {
+                    System.debug(
+                        LoggingLevel.WARN,
+                        'RecordTouchBatch.execute: failed to update automation record — ' +
+                        bookkeepingException.getMessage()
+                    );
+                }
+            }
+            
+            Database.executeBatch(this, batchSize);
+        }
+        
+        // Remove the current one-time CronTrigger after it fires.
+        if (schedulableContext != null && schedulableContext.getTriggerId() != null) {
+            try {
+                System.abortJob(schedulableContext.getTriggerId());
+            } catch (Exception abortException) {
+                System.debug(
+                    LoggingLevel.WARN,
+                    'RecordTouchBatch.execute: could not abort current CronTrigger — ' +
+                    abortException.getMessage()
+                );
+            }
+        }
+    }
+    
+
+    private static final Integer MIN_FUTURE_BUFFER_SECONDS = 90;
+    
+    private void scheduleNextOccurrence(Batch_Automation__c automation) {
+        
+        System.debug(LoggingLevel.ERROR,
+                     '=== scheduleNextOccurrence START ===' +
+                     '\nobjectName=' + objectName +
+                     '\nwhereClause=' + whereClause +
+                     '\nbatchSize=' + batchSize +
+                     '\nnotifyEmail=' + notifyEmail +
+                     '\nisRepeatJob=' + isRepeatJob +
+                     '\nrepeatAfterDays=' + repeatAfterDays +
+                     '\nrepeatHour=' + repeatHour
+                    );
+        Datetime anchor  = scheduledRunDatetime != null ? scheduledRunDatetime : Datetime.now();
+        Datetime nextRun;
+        
+        if (repeatWeekdays != null && !repeatWeekdays.isEmpty()) {
+            nextRun = computeNextWeekdayRun(anchor, repeatWeekdays);
+        } else if (repeatAfterDays != null && repeatAfterDays > 0) {
+            nextRun = anchor.addDays(repeatAfterDays);
+        }
+        
+        if (nextRun == null) {
+            if (automation != null) {
+                automation.Active__c         = false;
+                automation.Next_fire_time__c = null;
+            }
+            return;
+        }
+        
+        Datetime earliestSafeFireTime = Datetime.now().addSeconds(MIN_FUTURE_BUFFER_SECONDS);
+        Integer guardIterations = 0;
+        
+        while (nextRun < earliestSafeFireTime && guardIterations < 366) {
+            if (repeatWeekdays != null && !repeatWeekdays.isEmpty()) {
+                nextRun = computeNextWeekdayRun(nextRun, repeatWeekdays);
+            } else {
+                nextRun = nextRun.addDays(repeatAfterDays);
+            }
+            guardIterations++;
+            
+            if (nextRun == null) {
+                if (automation != null) {
+                    automation.Active__c         = false;
+                    automation.Next_fire_time__c = null;
+                }
+                System.debug(
+                    LoggingLevel.ERROR,
+                    'RecordTouchBatch.scheduleNextOccurrence: could not compute a future ' +
+                    'occurrence while advancing past stale anchor time.'
+                );
+                return;
+            }
+        }
+        
+        if (guardIterations >= 366) {
+            if (automation != null) {
+                automation.Active__c         = false;
+                automation.Next_fire_time__c = null;
+            }
+            System.debug(
+                LoggingLevel.ERROR,
+                'RecordTouchBatch.scheduleNextOccurrence: exceeded safety guard while ' +
+                'searching for a future occurrence — check repeatAfterDays/repeatWeekdays config.'
+            );
+            return;
+        }
+        
+        Boolean nextRunAppliesHourWindow = repeatHour != null && repeatHour > 0;
+        
+        String nextWhereClause = whereClause;
+        
+        System.debug(LoggingLevel.ERROR,
+                     'Original whereClause=' + nextWhereClause
+                    );
+        
+        if (String.isBlank(nextWhereClause)) {
+            
+            System.debug(LoggingLevel.ERROR,
+                         'whereClause is NULL. Attempting recovery from current query.'
+                        );
+            
+            if (!String.isBlank(overrideQuery)) {
+                
+                Integer wherePos =
+                    overrideQuery.toUpperCase().indexOf(' WHERE ');
+                
+                if (wherePos > -1) {
+                    nextWhereClause =
+                        overrideQuery.substring(wherePos + 7);
+                }
+            }
+        }
+        
+        if (String.isBlank(nextWhereClause)) {
+            
+            System.debug(LoggingLevel.ERROR,
+                         'Unable to recover whereClause, using Id != null fallback'
+                        );
+            
+            nextWhereClause = 'Id != null';
+        }
+        
+        nextWhereClause =
+            stripExistingLastModifiedWindow(nextWhereClause);
+        
+        System.debug(LoggingLevel.ERROR,
+                     'Final nextWhereClause=' + nextWhereClause
+                    );
+        
+        RecordTouchBatch nextJob = new RecordTouchBatch(
+            objectName,
+            nextWhereClause,
+            batchSize,
+            notifyEmail,
+            isRepeatJob,
+            repeatAfterDays,
+            repeatWeekdays,
+            repeatHour,
+            nextRun,
+            batchAutomationId
+        );
+        
+      
+        nextJob.applyRepeatHourWindow = nextRunAppliesHourWindow;
+        
+        String cronExpression = buildOneTimeCron(nextRun);
+        
+
+        String jobName =
+            'RecordTouch-' +
+            objectName + '-' +
+            (batchAutomationId != null
+             ? String.valueOf(batchAutomationId).right(6) + '-'
+             : '') +
+            String.valueOf(Datetime.now().getTime());
+        
+        if (jobName.length() > 80) {
+            jobName = jobName.substring(0, 80);
+        }
+       
+        System.schedule(jobName, cronExpression, nextJob);
+        
+      
+        pendingNextRunDatetime          = nextRun;
+        pendingNextRunAppliesHourWindow = nextRunAppliesHourWindow;
+        
+        if (automation != null) {
+            automation.Next_fire_time__c = nextRun;
+        }
+    }
+    
+
+    private static Datetime computeNextWeekdayRun(Datetime anchor, List<String> weekdayCodes) {
+        Set<Integer> targetIndices = new Set<Integer>();
+        
+        for (String weekdayCode : weekdayCodes) {
+            if (String.isBlank(weekdayCode)) { continue; }
+            Integer weekdayCodeIndex =
+                WEEKDAY_CODES_BY_INDEX.indexOf(weekdayCode.trim().toUpperCase());
+            if (weekdayCodeIndex >= 0) {
+                targetIndices.add(weekdayCodeIndex);
+            }
+        }
+        
+        if (targetIndices.isEmpty()) { return null; }
+        
+        Time anchorTime = anchor.time();
+        Date anchorDate = anchor.date();
+        
+        for (Integer offset = 1; offset <= 7; offset++) {
+            Date candidateDate = anchorDate.addDays(offset);
+            if (targetIndices.contains(weekdayIndex(candidateDate))) {
+                return Datetime.newInstance(candidateDate, anchorTime);
+            }
+        }
+        
+        return null;
+    }
+    
+    /** Maps a Date to a 0(SUN)-6(SAT) weekday index using a fixed reference Sunday. */
+    private static Integer weekdayIndex(Date dateValue) {
+        Integer dayOffset = Math.mod(
+            WEEKDAY_REFERENCE_SUNDAY.daysBetween(dateValue), 7
+        );
+        if (dayOffset < 0) { dayOffset += 7; }
+        return dayOffset;
+    }
+    
+    /** Builds a one-time (non-repeating, "? year") CRON expression for the given Datetime. */
+    private static String buildOneTimeCron(Datetime runAt) {
+        return
+            runAt.second()  + ' ' +
+            runAt.minute()  + ' ' +
+            runAt.hour()    + ' ' +
+            runAt.day()     + ' ' +
+            runAt.month()   + ' ? ' +
+            runAt.year();
+    }
+    
+
+    private static List<String> normalizeWeekdayCodes(List<String> weekdayCodes) {
+        Set<String> suppliedCodes = new Set<String>();
+        
+        for (String weekdayCode : weekdayCodes) {
+            if (String.isBlank(weekdayCode)) { continue; }
+            String normalizedCode = weekdayCode.trim().toUpperCase();
+            if (WEEKDAY_CODES_BY_INDEX.contains(normalizedCode)) {
+                suppliedCodes.add(normalizedCode);
+            }
+        }
+        
+        List<String> normalizedCodes = new List<String>();
+        
+        for (String supportedCode : WEEKDAY_CODES_BY_INDEX) {
+            if (suppliedCodes.contains(supportedCode)) {
+                normalizedCodes.add(supportedCode);
+            }
+        }
+        
+        if (normalizedCodes.isEmpty()) {
+            throw new RecordTouchException(
+                'repeatWeekdays does not contain a valid weekday. ' +
+                'Supported values are SUN, MON, TUE, WED, THU, FRI, and SAT.'
+            );
+        }
+        
+        return normalizedCodes;
+    }
+    
+    public class RecordTouchException extends Exception {}
+}
